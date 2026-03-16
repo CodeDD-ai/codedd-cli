@@ -2,7 +2,6 @@
 Server endpoint path constants.
 
 All paths are relative to the ``api_url`` stored in the CLI config
-(defaults to ``https://api.codedd.ai/django_codedd``).
 """
 
 
@@ -39,6 +38,7 @@ class Endpoints:
 
     # Local git statistics (for CLI-driven audits; enables dashboards)
     AUDIT_GIT_STATISTICS = "/api/cli/audit/git-statistics/"
+    AUDIT_VULNERABILITY_VALIDATION = "/api/cli/audit/vulnerability-validation/"
 
     # Architecture analysis (Phase 1+2 run locally; server runs Phase 3 + storage)
     AUDIT_ARCHITECTURE = "/api/cli/audit/architecture/"
