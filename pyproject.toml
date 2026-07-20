@@ -4,13 +4,13 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "codedd-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "CLI tool for CodeDD — run code audits from your terminal"
 authors = ["CodeDD <support@codedd.ai>"]
 license = "MIT"
 readme = "README.md"
 homepage = "https://codedd.ai"
-repository = "https://github.com/codedd/codedd-cli"
+repository = "https://gitlab.com/codedd1/codedd-cli"
 keywords = ["code-audit", "security", "cli", "codedd"]
 classifiers = [
     "Development Status :: 3 - Alpha",

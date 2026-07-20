@@ -88,18 +88,19 @@ class FileComplexityResult:
 
 _EXTENSION_TO_LANG: dict[str, str] = {
     # Python
-    ".py": "python", ".pyx": "python", ".pyw": "python",
+    ".py": "python", ".pyx": "python", ".pxd": "python", ".pxi": "python", ".pyw": "python",
     # JavaScript/TypeScript
-    ".js": "javascript", ".jsx": "javascript",
-    ".ts": "typescript", ".tsx": "typescript",
+    ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+    ".ts": "typescript", ".tsx": "typescript", ".mts": "typescript", ".cts": "typescript",
+    ".vue": "javascript", ".svelte": "javascript",
     # C/C++/C#
     ".c": "c", ".h": "c",
     ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".hxx": "cpp",
-    ".cs": "csharp",
+    ".cs": "csharp", ".fs": "fsharp",
     # Java
     ".java": "java",
     # Ruby
-    ".rb": "ruby",
+    ".rb": "ruby", ".rake": "ruby",
     # Go
     ".go": "go",
     # PHP
@@ -109,27 +110,40 @@ _EXTENSION_TO_LANG: dict[str, str] = {
     # Perl
     ".pl": "perl", ".pm": "perl", ".t": "perl", ".pod": "perl",
     # R
-    ".r": "r", ".rmd": "r",
+    ".r": "r", ".rmd": "r", ".jl": "julia",
     # Shell/Bash
     ".sh": "shell", ".bash": "shell", ".zsh": "shell", ".fish": "shell",
-    ".ksh": "shell", ".csh": "shell", ".tcsh": "shell",
+    ".ksh": "shell", ".csh": "shell", ".tcsh": "shell", ".bat": "shell", ".cmd": "shell",
+    ".awk": "shell", ".sed": "shell",
     # PowerShell
     ".ps1": "powershell", ".psm1": "powershell", ".psd1": "powershell",
     # SQL
-    ".sql": "sql", ".hql": "sql",
+    ".sql": "sql", ".hql": "sql", ".cypher": "sql",
+    # GraphQL
+    ".graphql": "graphql", ".gql": "graphql",
     # Rust / Scala / Kotlin
-    ".rs": "rust", ".scala": "scala", ".kt": "kotlin", ".kts": "kotlin",
+    ".rs": "rust", ".scala": "scala", ".sc": "scala", ".kt": "kotlin", ".kts": "kotlin",
+    # Other functional / systems languages
+    ".clj": "clojure", ".cljs": "clojure", ".cljc": "clojure",
+    ".erl": "erlang", ".ex": "elixir", ".exs": "elixir",
+    ".hs": "haskell", ".lhs": "haskell", ".lua": "lua",
+    ".dart": "dart", ".groovy": "groovy", ".tcl": "tcl",
+    ".nim": "nim", ".cr": "crystal", ".ml": "ocaml",
+    ".zig": "zig", ".v": "vlang", ".gleam": "gleam",
+    # Low-level and scientific languages
+    ".asm": "assembly", ".s": "assembly",
+    ".f90": "fortran", ".f95": "fortran", ".f03": "fortran",
 }
 
 # Source-code extensions for the "is this file worth analysing?" check
 _SOURCE_CODE_EXTENSIONS: set[str] = {
-    ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".php",
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte", ".php",
     ".py", ".java", ".cpp", ".cc", ".cxx", ".hpp", ".c", ".h", ".cs", ".fs",
     ".go", ".rs", ".rb", ".rake", ".swift", ".kt", ".kts", ".scala", ".sc",
     ".clj", ".cljs", ".cljc", ".erl", ".ex", ".exs", ".hs", ".lhs", ".lua",
-    ".pl", ".pm", ".t", ".r", ".rmd", ".jl", ".dart", ".groovy", ".tcl",
+    ".pl", ".pm", ".t", ".pod", ".r", ".rmd", ".jl", ".dart", ".groovy", ".tcl",
     ".nim", ".cr", ".ml", ".zig", ".v", ".gleam",
-    ".sh", ".bash", ".zsh", ".fish", ".bat", ".cmd", ".ps1", ".psm1",
+    ".sh", ".bash", ".zsh", ".fish", ".bat", ".cmd", ".ps1", ".psm1", ".psd1",
     ".awk", ".sed", ".ksh", ".csh", ".tcsh",
     ".sql", ".hql", ".cypher", ".graphql", ".gql",
     ".pyx", ".pxd", ".pxi",
@@ -148,6 +162,25 @@ def _get_language(file_path: str) -> str | None:
     """Map a file path to a language identifier (or None)."""
     _, ext = os.path.splitext(file_path)
     return _EXTENSION_TO_LANG.get(ext.lower())
+
+
+def _is_source_code_file_info(file_info: dict) -> bool:
+    """
+    Source-code detection using both canonical cli:// and relative path.
+
+    Some plan payloads carry conservative canonical paths, while relative_path
+    always mirrors the real repo filename. Using both avoids false negatives.
+    """
+    canonical_path = str(file_info.get("file_path", "")).strip()
+    relative_path = str(file_info.get("relative_path", "")).strip()
+    return _is_source_code(canonical_path) or _is_source_code(relative_path)
+
+
+def _get_language_file_info(file_info: dict) -> str | None:
+    """Resolve language using canonical path first, then relative path."""
+    canonical_path = str(file_info.get("file_path", "")).strip()
+    relative_path = str(file_info.get("relative_path", "")).strip()
+    return _get_language(canonical_path) or _get_language(relative_path)
 
 
 # ---------------------------------------------------------------------------
@@ -810,7 +843,7 @@ class LocalComplexityAnalyzer:
             List of ``FileComplexityResult`` objects.
         """
         results: list[FileComplexityResult] = []
-        source_files = [f for f in files if _is_source_code(f.get("file_path", ""))]
+        source_files = [f for f in files if _is_source_code_file_info(f)]
 
         if not source_files:
             self._debug("No source-code files to analyse for complexity.")
@@ -842,6 +875,13 @@ class LocalComplexityAnalyzer:
 
         ok = sum(1 for r in results if r.success)
         fail = len(results) - ok
+        if fail:
+            sample_failures = [
+                f"{r.relative_path or r.file_path}: {r.error}"
+                for r in results if not r.success
+            ][:3]
+            if sample_failures:
+                self._debug("Sample complexity failures: " + " | ".join(sample_failures))
         self._debug(f"Complexity analysis complete: {ok} ok, {fail} failed")
         return results
 
@@ -861,7 +901,10 @@ class LocalComplexityAnalyzer:
                 error="Missing local directory or relative path",
             )
 
-        disk_path = os.path.join(local_dir, relative_path.replace("/", os.sep))
+        disk_path = os.path.join(
+            local_dir,
+            relative_path.replace("\\", os.sep).replace("/", os.sep),
+        )
 
         try:
             with open(disk_path, "r", encoding="utf-8", errors="replace") as fh:
@@ -880,7 +923,11 @@ class LocalComplexityAnalyzer:
                 error="File is empty",
             )
 
-        metrics = analyze_file_complexity(file_path, content)
+        metrics = analyze_file_complexity(
+            file_path,
+            content,
+            language=_get_language_file_info(file_info),
+        )
         if metrics is None:
             return FileComplexityResult(
                 file_path=file_path,

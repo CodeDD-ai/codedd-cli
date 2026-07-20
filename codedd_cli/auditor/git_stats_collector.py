@@ -10,6 +10,8 @@ and the server has no clone (cli:// root_path).
 import os
 import subprocess
 from pathlib import Path
+from collections import defaultdict
+from datetime import datetime
 from typing import Any, Callable, Optional
 
 
@@ -81,6 +83,9 @@ def collect_git_statistics(
 
     # Author statistics (counts per author)
     author_stats = _collect_author_stats(repo_path, default_branch, dbg)
+    time_based_stats = _derive_time_based_stats(commit_history)
+    code_churn_stats = _derive_code_churn_stats(commit_history)
+    collaboration_stats = _derive_collaboration_stats(commit_history)
 
     return {
         "commit_history": commit_history,
@@ -88,10 +93,10 @@ def collect_git_statistics(
         "merge_stats": {},
         "branch_stats": _collect_branch_stats(repo_path, dbg) or {},
         "meta_info": _collect_meta_info(repo_path, default_branch) or {},
-        "time_based_stats": {},
+        "time_based_stats": time_based_stats,
         "release_stats": {},
-        "code_churn_stats": {},
-        "collaboration_stats": {},
+        "code_churn_stats": code_churn_stats,
+        "collaboration_stats": collaboration_stats,
         "repository_name": repository_name,
         "repository_url": repository_url,
     }
@@ -179,4 +184,149 @@ def _collect_meta_info(repo_path: str, default_branch: str) -> dict:
         "first_commit_date": first,
         "latest_commit_date": latest,
         "default_branch": default_branch,
+    }
+
+
+def _parse_commit_datetime(raw: str) -> Optional[datetime]:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _derive_time_based_stats(commit_history: dict) -> dict:
+    commits = commit_history.get("commits", []) if isinstance(commit_history, dict) else []
+    if not commits:
+        return {}
+
+    commit_dates: list[datetime] = []
+    daily_commits_by_author: dict[str, dict[str, int]] = defaultdict(dict)
+    daily_totals: dict[str, int] = defaultdict(int)
+    weekly_totals: dict[str, int] = defaultdict(int)
+
+    for commit in commits:
+        when = _parse_commit_datetime(str(commit.get("date", "")))
+        if not when:
+            continue
+        commit_dates.append(when)
+        day_key = when.strftime("%Y-%m-%d")
+        week_key = when.strftime("%Y-W%W")
+        author = str(commit.get("author", "unknown")).strip() or "unknown"
+
+        daily_totals[day_key] += 1
+        weekly_totals[week_key] += 1
+        per_author = daily_commits_by_author[author]
+        per_author[day_key] = per_author.get(day_key, 0) + 1
+
+    if not commit_dates:
+        return {}
+
+    first_commit = min(commit_dates)
+    last_commit = max(commit_dates)
+    repo_days = max((last_commit - first_commit).days + 1, 1)
+
+    return {
+        "commit_frequency": {
+            "total_commits": len(commit_dates),
+            "days_active": repo_days,
+            "avg_commits_per_day": len(commit_dates) / repo_days,
+            "avg_commits_per_week": len(commit_dates) / max(repo_days / 7, 1),
+            "most_active_day": max(daily_totals.items(), key=lambda x: x[1]) if daily_totals else None,
+            "most_active_week": max(weekly_totals.items(), key=lambda x: x[1]) if weekly_totals else None,
+        },
+        "activity_periods": {
+            "first_commit_date": first_commit.isoformat(),
+            "last_commit_date": last_commit.isoformat(),
+            "repository_age_days": repo_days,
+            "daily_commit_counts": dict(daily_totals),
+            "weekly_commit_counts": dict(weekly_totals),
+            "daily_commits_by_author": {k: dict(v) for k, v in daily_commits_by_author.items()},
+            "total_daily_commits": dict(daily_totals),
+        },
+    }
+
+
+def _derive_code_churn_stats(commit_history: dict) -> dict:
+    commits = commit_history.get("commits", []) if isinstance(commit_history, dict) else []
+    if not commits:
+        return {}
+
+    per_file: dict[str, dict[str, int]] = defaultdict(lambda: {"commits": 0, "added": 0, "deleted": 0})
+    total_added = 0
+    total_deleted = 0
+
+    for commit in commits:
+        for change in commit.get("file_changes", []) or []:
+            filename = str(change.get("filename", "")).strip()
+            if not filename:
+                continue
+            added = int(change.get("added", 0) or 0)
+            deleted = int(change.get("deleted", 0) or 0)
+            per_file[filename]["commits"] += 1
+            per_file[filename]["added"] += added
+            per_file[filename]["deleted"] += deleted
+            total_added += added
+            total_deleted += deleted
+
+    most_modified = sorted(
+        (
+            {
+                "file_path": fp,
+                "commits": vals["commits"],
+                "added": vals["added"],
+                "deleted": vals["deleted"],
+                "churn": vals["added"] + vals["deleted"],
+            }
+            for fp, vals in per_file.items()
+        ),
+        key=lambda row: (-row["commits"], -row["churn"]),
+    )[:25]
+
+    return {
+        "churn_summary": {
+            "total_lines_added": total_added,
+            "total_lines_deleted": total_deleted,
+            "total_line_changes": total_added + total_deleted,
+            "files_touched": len(per_file),
+        },
+        "hotspots": {
+            "most_modified_files": most_modified,
+        },
+    }
+
+
+def _derive_collaboration_stats(commit_history: dict) -> dict:
+    commits = commit_history.get("commits", []) if isinstance(commit_history, dict) else []
+    if not commits:
+        return {}
+
+    authors_by_file: dict[str, set[str]] = defaultdict(set)
+    coauthor_pairs: dict[tuple[str, str], int] = defaultdict(int)
+
+    for commit in commits:
+        author = str(commit.get("author", "unknown")).strip() or "unknown"
+        changed_files = commit.get("file_changes", []) or []
+        touched = []
+        for change in changed_files:
+            filename = str(change.get("filename", "")).strip()
+            if filename:
+                authors_by_file[filename].add(author)
+                touched.append(filename)
+        if len(touched) > 1:
+            # Commit-level pairing heuristic for shared file edits.
+            unique_files = sorted(set(touched))
+            for i in range(len(unique_files) - 1):
+                pair = (unique_files[i], unique_files[i + 1])
+                coauthor_pairs[pair] += 1
+
+    collaborative_files = sum(1 for authors in authors_by_file.values() if len(authors) > 1)
+    return {
+        "files_with_multiple_authors": collaborative_files,
+        "collaboration_ratio": (collaborative_files / len(authors_by_file)) if authors_by_file else 0,
+        "top_collaboration_pairs": [
+            {"file_pair": list(pair), "shared_commits": count}
+            for pair, count in sorted(coauthor_pairs.items(), key=lambda x: -x[1])[:20]
+        ],
     }

@@ -41,6 +41,10 @@ from codedd_cli.auditor.dependency_scanner import (
     ImportResult,
 )
 from codedd_cli.auditor.file_auditor import AuditFileResult, LocalFileAuditor
+from codedd_cli.auditor.vulnerability_validator import (
+    LocalVulnerabilityValidator,
+    ValidationCandidate,
+)
 from codedd_cli.auth.session import require_auth
 from codedd_cli.config.settings import ConfigManager
 from codedd_cli.llm.key_manager import PROVIDER_MODELS, LLMKeyManager
@@ -98,6 +102,11 @@ def start_audit(
         False,
         "--debug-llm",
         help="Print full LLM prompt, raw response, and parsed result to the CLI (for debugging).",
+    ),
+    debug_llm_full_prompt: bool = typer.Option(
+        False,
+        "--debug-llm-full-prompt",
+        help="Include full proprietary system prompt in --debug-llm output (sensitive).",
     ),
 ) -> None:
     """
@@ -312,7 +321,13 @@ def start_audit(
     # -----------------------------------------------------------------------
     # Phase 5 — Local file audit
     # -----------------------------------------------------------------------
-    _run_local_audit(cfg, audit_uuid, show=show, debug_llm=debug_llm)
+    _run_local_audit(
+        cfg,
+        audit_uuid,
+        show=show,
+        debug_llm=debug_llm,
+        debug_llm_full_prompt=debug_llm_full_prompt,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -667,6 +682,7 @@ def _run_local_audit(
     audit_uuid: str,
     show: bool = False,
     debug_llm: bool = False,
+    debug_llm_full_prompt: bool = False,
 ) -> None:
     """
     Execute the full local audit flow:
@@ -724,6 +740,7 @@ def _run_local_audit(
         raise typer.Exit(code=1)
 
     system_prompt = plan.get("prompts", {}).get("file_audit", "")
+    vulnerability_validation_prompt = plan.get("prompts", {}).get("vulnerability_validation", "")
     if not system_prompt:
         print_error("Server returned an empty system prompt.  Cannot audit.")
         raise typer.Exit(code=1)
@@ -874,8 +891,13 @@ def _run_local_audit(
         console.print(f"\n[bold cyan]{sep}[/bold cyan]")
         console.print("[bold cyan]  LLM DEBUG DUMP[/bold cyan]")
         console.print(f"[bold cyan]{sep}[/bold cyan]\n")
-        console.print("[bold]--- PROMPT (complete) sent to LLM ---[/bold]")
-        console.print(f"[dim]{full_prompt}[/dim]\n")
+        console.print("[bold]--- PROMPT sent to LLM ---[/bold]")
+        if debug_llm_full_prompt:
+            console.print(f"[dim]{full_prompt}[/dim]\n")
+        else:
+            console.print(
+                "[dim][system prompt redacted] Use --debug-llm-full-prompt to include it.[/dim]\n"
+            )
         console.print("[bold]--- RAW RESPONSE from LLM ---[/bold]")
         console.print(f"[dim]{response_text}[/dim]\n")
         console.print("[bold]--- PARSED RESULT (response_parser) ---[/bold]")
@@ -1061,7 +1083,8 @@ def _run_local_audit(
         grid.add_row(f"  [dim]{elapsed_m}m {elapsed_sec:02d}s[/dim]")
         return grid
 
-    # Fetch dependency config from server ("hidden method"); 404 = backend doesn't support it yet
+    # Fetch dependency config from an authenticated internal endpoint.
+    # 404 means backend doesn't support it yet; defaults remain safe.
     dep_config: dict = {}
     try:
         with CodeDDClient(config=cfg) as client:
@@ -1422,6 +1445,106 @@ def _run_local_audit(
         + (f", [yellow]{total_errors} error(s)[/yellow]" if total_errors else "")
     )
     console.print()
+
+    # ---- Step 3a.1: Run local source-based vulnerability validation --------
+    validation_by_sub: dict[str, list[dict]] = {}
+    file_to_sub_uuid = {f["file_path"]: f.get("sub_audit_uuid", "") for f in all_files}
+    file_to_local_path: dict[str, str] = {}
+    for f in all_files:
+        repo_name = f.get("repo_name", "")
+        rel_path = f.get("relative_path", "")
+        local_root = scope_dirs.get(repo_name, "")
+        if local_root and rel_path:
+            file_to_local_path[f["file_path"]] = os.path.join(
+                local_root, rel_path.replace("/", os.sep).replace("\\", os.sep)
+            )
+
+    validation_candidates: list[ValidationCandidate] = []
+    for r in successful_results:
+        audit_data = r.audit_data or {}
+        flag_color = str(audit_data.get("flag_color", "")).strip().lower()
+        reasons = str(audit_data.get("reasons_of_flag", "")).strip()
+        if flag_color not in {"red", "orange"}:
+            continue
+        if not reasons or reasons.upper() in {"N/A", "NONE"}:
+            continue
+
+        local_path = file_to_local_path.get(r.file_path, "")
+        sub_uuid = file_to_sub_uuid.get(r.file_path, "")
+        if not local_path or not sub_uuid:
+            continue
+
+        revised_time = audit_data.get("time_to_fix_flag")
+        try:
+            revised_time = float(revised_time) if revised_time is not None else None
+        except (TypeError, ValueError):
+            revised_time = None
+
+        validation_candidates.append(
+            ValidationCandidate(
+                file_path=r.file_path,
+                local_path=local_path,
+                hypothesis=reasons,
+                flag_color=flag_color,
+                stored_time_to_fix_hours=revised_time,
+            )
+        )
+
+    if validation_candidates:
+        console.print("[bold]Validating flagged vulnerabilities locally…[/bold]\n")
+        with LocalVulnerabilityValidator(
+            anthropic_key=anthropic_key,
+            openai_key=openai_key,
+            provider_preference=preference,
+            system_prompt=vulnerability_validation_prompt or None,
+            on_debug=None,
+        ) as validator:
+            validation_outcomes = validator.validate(validation_candidates)
+
+        for out in validation_outcomes:
+            sub_uuid = file_to_sub_uuid.get(out.file_path, "")
+            if not sub_uuid:
+                continue
+            validation_by_sub.setdefault(sub_uuid, []).append({
+                "file_path": out.file_path,
+                "conclusion": out.conclusion,
+                "impact": out.impact,
+                "confidence": out.confidence,
+                "recommended_action": out.recommended_action,
+                "revised_time_to_fix_hours": out.revised_time_to_fix_hours,
+            })
+
+    if validation_by_sub:
+        console.print("[bold]Submitting vulnerability validation outcomes…[/bold]\n")
+        validation_applied = 0
+        validation_failed = 0
+        with CodeDDClient(config=cfg) as client:
+            for sub_uuid, validations in validation_by_sub.items():
+                payload = {
+                    "audit_uuid": sub_uuid,
+                    "validations": validations,
+                }
+                try:
+                    resp = client.post(
+                        Endpoints.AUDIT_VULNERABILITY_VALIDATION,
+                        json=payload,
+                        timeout=90,
+                    )
+                    if resp.status_code == 200:
+                        body = resp.json()
+                        validation_applied += int(body.get("applied", 0))
+                        validation_failed += len(body.get("errors", []))
+                    else:
+                        validation_failed += len(validations)
+                except Exception:
+                    validation_failed += len(validations)
+
+        console.print(
+            f"  [green]{SYMBOL_OK}[/green] Validation outcomes submitted: "
+            f"[bold]{validation_applied}[/bold] applied"
+            + (f", [yellow]{validation_failed} failed[/yellow]" if validation_failed else "")
+        )
+        console.print()
 
     # ---- Step 3b: Submit complexity results --------------------------------
     if cx_ok:

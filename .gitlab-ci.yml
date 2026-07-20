@@ -1,0 +1,43 @@
+image: python:3.12
+
+stages:
+  - test
+  - release
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  POETRY_VIRTUALENVS_IN_PROJECT: "true"
+  POETRY_NO_INTERACTION: "1"
+
+cache:
+  key: "$CI_COMMIT_REF_SLUG"
+  paths:
+    - .cache/pip
+    - .venv
+
+test:
+  stage: test
+  before_script:
+    - python -V
+    - pip install --upgrade pip
+    - pip install poetry
+    - poetry install --with dev
+  script:
+    - poetry run pytest -q
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "master"'
+    - if: '$CI_COMMIT_BRANCH == "master"'
+
+release:pypi:
+  stage: release
+  before_script:
+    - python -V
+    - pip install --upgrade pip
+    - pip install build twine
+  script:
+    - python -c "import os,re,sys,tomllib; from pathlib import Path; py=tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8')); project_version=py['tool']['poetry']['version']; init_text=Path('codedd_cli/__init__.py').read_text(encoding='utf-8'); m=re.search(r'__version__\s*=\s*\"([^\"]+)\"', init_text); assert m, '__version__ was not found in codedd_cli/__init__.py'; init_version=m.group(1); tag=os.environ.get('CI_COMMIT_TAG',''); normalized_tag=tag[1:] if tag.startswith('v') else tag; assert normalized_tag, 'CI_COMMIT_TAG is empty'; assert project_version==init_version, f'Version mismatch: pyproject={project_version}, __init__={init_version}'; assert normalized_tag==project_version, f'Tag/version mismatch: tag={tag}, pyproject={project_version}'"
+    - python -m build
+    - python -m twine check dist/*
+    - python -m twine upload dist/*
+  rules:
+    - if: '$CI_COMMIT_TAG'

@@ -60,3 +60,8 @@ class TestEndpoints:
 
     def test_list_audits_path(self):
         assert Endpoints.LIST_AUDITS.startswith("/api/cli/")
+
+    def test_new_audit_endpoints_paths(self):
+        assert Endpoints.AUDIT_COMPLEXITY.startswith("/api/cli/")
+        assert Endpoints.AUDIT_GIT_STATISTICS.startswith("/api/cli/")
+        assert Endpoints.AUDIT_VULNERABILITY_VALIDATION.startswith("/api/cli/")
