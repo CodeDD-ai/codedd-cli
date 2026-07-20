@@ -1,4 +1,5 @@
 # CodeDD CLI - GITHUB TEST REPOSITORY
+# THIS IS NOT THE REAL CODEDD CLI REPOSITORY. THE REAL ONE IS HOSTED ON GITLAB
 
 **Run code audits from your terminal.** The CodeDD CLI lets you define scope locally, run file-level and complexity analysis on your machine (using your own LLM API keys), and sync results to [CodeDD](https://codedd.ai) for consolidation, recommendations, and dashboards.
 
